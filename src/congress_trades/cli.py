@@ -40,8 +40,8 @@ def _get_api_key() -> str:
     "--limit",
     "-l",
     type=int,
-    default=100,
-    help="Number of trades to fetch per chamber.",
+    default=25,
+    help="Number of trades to fetch per chamber (free tier max: 25).",
 )
 @click.option(
     "--all",
