@@ -10,13 +10,10 @@ from congress_trades.display import display_trades
 
 def _make_trade(symbol: str = "AAPL", trade_type: str = "Purchase") -> Trade:
     return Trade(
+        politician="Doe, Jane (Senator)",
         symbol=symbol,
-        disclosure_date="2025-01-31",
-        transaction_date="2025-01-15",
-        first_name="Jane",
-        last_name="Doe",
-        office="Jane Doe",
-        district="CA",
+        transaction_date="01/15/2026",
+        filing_date="02/15/2026",
         owner="Self",
         asset_description="Apple Inc",
         asset_type="Stock",
@@ -24,7 +21,6 @@ def _make_trade(symbol: str = "AAPL", trade_type: str = "Purchase") -> Trade:
         amount="$1,001 - $15,000",
         comment="",
         link="https://example.com",
-        chamber="Senate",
     )
 
 
@@ -50,7 +46,7 @@ class TestDisplayTrades:
         trade = _make_trade("AAPL", "Purchase")
         output = _capture_display([trade], 10)
 
-        assert "Jane Doe" in output
+        assert "Doe, Jane (Senator)" in output
         assert "AAPL" in output
         assert "Purchase" in output
         assert "1 new trades found" in output
@@ -67,3 +63,9 @@ class TestDisplayTrades:
         output = _capture_display(trades, 100)
 
         assert "2 new trades found (100 total checked)" in output
+
+    def test_no_chamber_column(self) -> None:
+        trade = _make_trade("AAPL")
+        output = _capture_display([trade], 1)
+
+        assert "Chamber" not in output

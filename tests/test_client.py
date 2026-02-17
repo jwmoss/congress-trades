@@ -1,140 +1,258 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import httpx
 import pytest
 
-from congress_trades.client import FMPError, _fetch_trades, _parse_trade
+from congress_trades.client import (
+    SenateClient,
+    SenateEFDError,
+    Trade,
+    _extract_ptr_link,
+    _TradeTableParser,
+)
+
+SAMPLE_PTR_HTML = """
+<table>
+<thead><tr><th>#</th><th>Transaction Date</th><th>Owner</th><th>Ticker</th>
+<th>Asset Name</th><th>Asset Type</th><th>Type</th><th>Amount</th><th>Comment</th></tr></thead>
+<tbody>
+<tr>
+<td>1</td><td>01/15/2026</td><td>Self</td><td>AAPL</td>
+<td>Apple Inc</td><td>Stock</td><td>Purchase</td><td>$1,001 - $15,000</td><td></td>
+</tr>
+<tr>
+<td>2</td><td>01/16/2026</td><td>Spouse</td><td>MSFT</td>
+<td>Microsoft Corp</td><td>Stock</td><td>Sale (Full)</td><td>$15,001 - $50,000</td><td>Planned</td>
+</tr>
+</tbody>
+</table>
+"""
+
+SAMPLE_REPORT_JSON = {
+    "recordsTotal": 2,
+    "data": [
+        [
+            "John",
+            "Boozman",
+            "Boozman, John (Senator)",
+            '<a href="/search/view/ptr/abc-123/">Periodic Transaction Report for 02/15/2026</a>',
+            "02/15/2026",
+        ],
+        [
+            "Lisa",
+            "Murkowski",
+            "Murkowski, Lisa (Senator)",
+            '<a href="/search/view/ptr/def-456/">Periodic Transaction Report for 02/14/2026</a>',
+            "02/14/2026",
+        ],
+    ],
+}
 
 
-def _make_raw_trade(**overrides: str) -> dict:
-    defaults = {
-        "symbol": "AAPL",
-        "disclosureDate": "2025-01-31",
-        "transactionDate": "2025-01-15",
-        "firstName": "Jane",
-        "lastName": "Doe",
-        "office": "Jane Doe",
-        "district": "CA",
-        "owner": "Self",
-        "assetDescription": "Apple Inc",
-        "assetType": "Stock",
-        "type": "Purchase",
-        "amount": "$1,001 - $15,000",
-        "comment": "",
-        "link": "https://example.com/filing",
-    }
-    defaults.update(overrides)
-    return defaults
+def _mock_transport(responses: dict[str, httpx.Response]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        for pattern, response in responses.items():
+            if pattern in str(request.url):
+                return response
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
 
 
-class TestParseTrade:
-    def test_parses_all_fields(self) -> None:
-        raw = _make_raw_trade()
-        trade = _parse_trade(raw, "Senate")
+def _make_client_with_mock(responses: dict[str, httpx.Response]) -> httpx.Client:
+    transport = _mock_transport(responses)
+    client = httpx.Client(transport=transport)
+    client.cookies.set("csrftoken", "fake-csrf-token")
+    return client
 
-        assert trade.symbol == "AAPL"
-        assert trade.first_name == "Jane"
-        assert trade.last_name == "Doe"
-        assert trade.chamber == "Senate"
-        assert trade.trade_type == "Purchase"
+
+class TestExtractPtrLink:
+    def test_extracts_href_and_text(self) -> None:
+        html = '<a href="/search/view/ptr/abc-123/">PTR for 02/15/2026</a>'
+        href, text = _extract_ptr_link(html)
+        assert href == "/search/view/ptr/abc-123/"
+        assert text == "PTR for 02/15/2026"
+
+    def test_empty_input(self) -> None:
+        href, text = _extract_ptr_link("")
+        assert href == ""
+        assert text == ""
+
+
+class TestTradeTableParser:
+    def test_parses_rows(self) -> None:
+        parser = _TradeTableParser()
+        parser.feed(SAMPLE_PTR_HTML)
+        assert len(parser.rows) == 2
+        assert parser.rows[0][3] == "AAPL"
+        assert parser.rows[1][3] == "MSFT"
+
+    def test_empty_table(self) -> None:
+        parser = _TradeTableParser()
+        parser.feed("<table><tbody></tbody></table>")
+        assert parser.rows == []
+
+    def test_no_tbody(self) -> None:
+        parser = _TradeTableParser()
+        parser.feed("<table><tr><td>data</td></tr></table>")
+        assert parser.rows == []
+
+
+class TestTrade:
+    def test_trade_id_deterministic(self) -> None:
+        t1 = Trade(
+            politician="Doe, Jane",
+            symbol="AAPL",
+            transaction_date="01/15/2026",
+            filing_date="02/15/2026",
+            owner="Self",
+            asset_description="Apple Inc",
+            asset_type="Stock",
+            trade_type="Purchase",
+            amount="$1,001 - $15,000",
+            comment="",
+            link="https://example.com",
+        )
+        t2 = Trade(
+            politician="Doe, Jane",
+            symbol="AAPL",
+            transaction_date="01/15/2026",
+            filing_date="02/15/2026",
+            owner="Self",
+            asset_description="Apple Inc",
+            asset_type="Stock",
+            trade_type="Purchase",
+            amount="$1,001 - $15,000",
+            comment="",
+            link="https://example.com",
+        )
+        assert t1.trade_id == t2.trade_id
+
+    def test_trade_id_differs_for_different_symbols(self) -> None:
+        kwargs = {
+            "politician": "Doe, Jane",
+            "transaction_date": "01/15/2026",
+            "filing_date": "02/15/2026",
+            "owner": "Self",
+            "asset_description": "Stock",
+            "asset_type": "Stock",
+            "trade_type": "Purchase",
+            "amount": "$1,001 - $15,000",
+            "comment": "",
+            "link": "https://example.com",
+        }
+        t1 = Trade(symbol="AAPL", **kwargs)
+        t2 = Trade(symbol="MSFT", **kwargs)
+        assert t1.trade_id != t2.trade_id
+
+    def test_is_purchase(self) -> None:
+        trade = Trade(
+            politician="X",
+            symbol="X",
+            transaction_date="",
+            filing_date="",
+            owner="",
+            asset_description="",
+            asset_type="",
+            trade_type="Purchase",
+            amount="",
+            comment="",
+            link="",
+        )
         assert trade.is_purchase is True
 
     def test_sale_is_not_purchase(self) -> None:
-        raw = _make_raw_trade(type="Sale (Full)")
-        trade = _parse_trade(raw, "House")
-
+        trade = Trade(
+            politician="X",
+            symbol="X",
+            transaction_date="",
+            filing_date="",
+            owner="",
+            asset_description="",
+            asset_type="",
+            trade_type="Sale (Full)",
+            amount="",
+            comment="",
+            link="",
+        )
         assert trade.is_purchase is False
-        assert trade.chamber == "House"
-
-    def test_missing_fields_default_to_empty(self) -> None:
-        trade = _parse_trade({}, "Senate")
-
-        assert trade.symbol == ""
-        assert trade.first_name == ""
-        assert trade.trade_type == ""
-
-    def test_trade_id_is_deterministic(self) -> None:
-        raw = _make_raw_trade()
-        trade1 = _parse_trade(raw, "Senate")
-        trade2 = _parse_trade(raw, "Senate")
-
-        assert trade1.trade_id == trade2.trade_id
-
-    def test_trade_id_differs_for_different_trades(self) -> None:
-        trade1 = _parse_trade(_make_raw_trade(symbol="AAPL"), "Senate")
-        trade2 = _parse_trade(_make_raw_trade(symbol="MSFT"), "Senate")
-
-        assert trade1.trade_id != trade2.trade_id
-
-    def test_politician_full_name(self) -> None:
-        trade = _parse_trade(_make_raw_trade(), "Senate")
-        assert trade.politician == "Jane Doe"
 
 
-class TestFetchTrades:
-    def test_returns_list_on_success(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = [_make_raw_trade()]
+class TestSenateClient:
+    def test_accept_agreement_failure(self) -> None:
+        transport = _mock_transport({
+            "/search/home/": httpx.Response(500),
+        })
+        client = httpx.Client(transport=transport)
+        with pytest.raises(SenateEFDError, match="Failed to load"):
+            SenateClient(client=client)
 
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
+    def test_missing_csrf_token(self) -> None:
+        transport = _mock_transport({
+            "/search/home/": httpx.Response(200),
+        })
+        client = httpx.Client(transport=transport)
+        with pytest.raises(SenateEFDError, match="No CSRF token"):
+            SenateClient(client=client)
 
-        result = _fetch_trades(mock_client, "senate-latest", "fake-key", 100)
-        assert len(result) == 1
-        assert result[0]["symbol"] == "AAPL"
+    def test_fetch_reports(self) -> None:
+        mock_client = _make_client_with_mock({
+            "/search/home/": httpx.Response(200),
+            "/search/report/data/": httpx.Response(200, json=SAMPLE_REPORT_JSON),
+        })
+        senate = SenateClient(client=mock_client)
+        reports = senate.fetch_reports(limit=10)
 
-    def test_raises_on_401(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 401
+        assert len(reports) == 2
+        assert reports[0]["politician"] == "Boozman, John (Senator)"
+        assert reports[0]["link"] == "/search/view/ptr/abc-123/"
+        assert reports[1]["filing_date"] == "02/14/2026"
 
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
+    def test_fetch_reports_error(self) -> None:
+        mock_client = _make_client_with_mock({
+            "/search/home/": httpx.Response(200),
+            "/search/report/data/": httpx.Response(500),
+        })
+        senate = SenateClient(client=mock_client)
+        with pytest.raises(SenateEFDError, match="Failed to fetch report data"):
+            senate.fetch_reports()
 
-        with pytest.raises(FMPError, match="Invalid API key"):
-            _fetch_trades(mock_client, "senate-latest", "bad-key", 100)
+    def test_fetch_trades_from_report(self) -> None:
+        mock_client = _make_client_with_mock({
+            "/search/home/": httpx.Response(200),
+            "/search/view/ptr/abc-123/": httpx.Response(200, text=SAMPLE_PTR_HTML),
+        })
+        senate = SenateClient(client=mock_client)
+        report = {
+            "politician": "Boozman, John (Senator)",
+            "link": "/search/view/ptr/abc-123/",
+            "filing_date": "02/15/2026",
+        }
+        trades = senate.fetch_trades_from_report(report)
 
-    def test_raises_on_429(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 429
+        assert len(trades) == 2
+        assert trades[0].symbol == "AAPL"
+        assert trades[0].politician == "Boozman, John (Senator)"
+        assert trades[0].trade_type == "Purchase"
+        assert trades[1].symbol == "MSFT"
+        assert trades[1].trade_type == "Sale (Full)"
 
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
+    def test_fetch_trades_from_report_empty_link(self) -> None:
+        mock_client = _make_client_with_mock({
+            "/search/home/": httpx.Response(200),
+        })
+        senate = SenateClient(client=mock_client)
+        report = {"politician": "X", "link": "", "filing_date": ""}
+        assert senate.fetch_trades_from_report(report) == []
 
-        with pytest.raises(FMPError, match="Rate limited"):
-            _fetch_trades(mock_client, "senate-latest", "key", 100)
-
-    def test_raises_on_error_message_in_body(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"Error Message": "Limit reached"}
-
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(FMPError, match="Limit reached"):
-            _fetch_trades(mock_client, "senate-latest", "key", 100)
-
-    def test_raises_on_unexpected_format(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = "not a list"
-
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(FMPError, match="Unexpected response format"):
-            _fetch_trades(mock_client, "senate-latest", "key", 100)
-
-    def test_returns_empty_list(self) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = []
-
-        mock_client = MagicMock(spec=httpx.Client)
-        mock_client.get.return_value = mock_response
-
-        result = _fetch_trades(mock_client, "senate-latest", "key", 100)
-        assert result == []
+    def test_fetch_trades_from_report_404(self) -> None:
+        mock_client = _make_client_with_mock({
+            "/search/home/": httpx.Response(200),
+        })
+        senate = SenateClient(client=mock_client)
+        report = {
+            "politician": "X",
+            "link": "/search/view/ptr/nonexistent/",
+            "filing_date": "",
+        }
+        assert senate.fetch_trades_from_report(report) == []

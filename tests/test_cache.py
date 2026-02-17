@@ -12,13 +12,10 @@ if TYPE_CHECKING:
 
 def _make_trade(symbol: str = "AAPL", trade_type: str = "Purchase") -> Trade:
     return Trade(
+        politician="Doe, Jane (Senator)",
         symbol=symbol,
-        disclosure_date="2025-01-31",
-        transaction_date="2025-01-15",
-        first_name="Jane",
-        last_name="Doe",
-        office="Jane Doe",
-        district="CA",
+        transaction_date="01/15/2026",
+        filing_date="02/15/2026",
         owner="Self",
         asset_description="Apple Inc",
         asset_type="Stock",
@@ -26,7 +23,6 @@ def _make_trade(symbol: str = "AAPL", trade_type: str = "Purchase") -> Trade:
         amount="$1,001 - $15,000",
         comment="",
         link="https://example.com",
-        chamber="Senate",
     )
 
 
