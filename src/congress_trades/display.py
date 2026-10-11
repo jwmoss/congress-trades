@@ -11,7 +11,9 @@ if TYPE_CHECKING:
 console = Console()
 
 
-def display_trades(trades: list[Trade], total_checked: int) -> None:
+def display_trades(trades: list[Trade], total_checked: int, *, no_color: bool = False) -> None:
+    if no_color:
+        console.no_color = True
     if not trades:
         console.print("[dim]No new trades found.[/dim]")
         return
@@ -36,6 +38,4 @@ def display_trades(trades: list[Trade], total_checked: int) -> None:
         )
 
     console.print(table)
-    console.print(
-        f"\n[bold]{len(trades)}[/bold] new trades found ({total_checked} total checked)"
-    )
+    console.print(f"\n[bold]{len(trades)}[/bold] new trades found ({total_checked} total checked)")
