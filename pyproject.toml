@@ -1,6 +1,6 @@
 [project]
 name = "congress-trades"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI tool to track congressional stock trades"
 readme = "README.md"
 authors = [
