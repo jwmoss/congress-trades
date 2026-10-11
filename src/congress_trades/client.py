@@ -116,21 +116,18 @@ def _extract_ptr_link(html_snippet: str) -> tuple[str, str]:
 class SenateClient:
     """Client for the Senate Electronic Financial Disclosure system."""
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
-        if client is not None:
-            self._client = client
-            self._owned = False
-        else:
-            self._client = httpx.Client(timeout=30, follow_redirects=True)
-            self._owned = True
-        self._accept_agreement()
+    def __init__(self, timeout: float = 30) -> None:
+        self._client = httpx.Client(timeout=timeout, follow_redirects=True)
+        try:
+            self._accept_agreement()
+        except Exception:
+            self._client.close()
+            raise
 
     def _accept_agreement(self) -> None:
         response = self._client.get(SEARCH_HOME)
         if response.status_code != 200:
-            raise SenateEFDError(
-                f"Failed to load eFD search page (status {response.status_code})"
-            )
+            raise SenateEFDError(f"Failed to load eFD search page (status {response.status_code})")
         csrf_token = self._client.cookies.get("csrftoken", "")
         if not csrf_token:
             raise SenateEFDError("No CSRF token received from eFD search page")
@@ -141,9 +138,7 @@ class SenateClient:
             headers={"Referer": SEARCH_HOME},
         )
         if response.status_code != 200:
-            raise SenateEFDError(
-                f"Failed to accept eFD agreement (status {response.status_code})"
-            )
+            raise SenateEFDError(f"Failed to accept eFD agreement (status {response.status_code})")
 
     def fetch_reports(self, limit: int = 10) -> list[dict]:
         """Fetch recent PTR report listings from the eFD search."""
@@ -159,13 +154,9 @@ class SenateClient:
             headers={"Referer": SEARCH_HOME},
         )
         if response.status_code == 503:
-            raise SenateEFDError(
-                "Senate eFD site is under maintenance. Try again later."
-            )
+            raise SenateEFDError("Senate eFD site is under maintenance. Try again later.")
         if response.status_code != 200:
-            raise SenateEFDError(
-                f"Failed to fetch report data (status {response.status_code})"
-            )
+            raise SenateEFDError(f"Failed to fetch report data (status {response.status_code})")
 
         body = response.json()
         if not isinstance(body, dict) or "data" not in body:
@@ -177,13 +168,15 @@ class SenateClient:
                 continue
             first_name, last_name, full_name, ptr_html, filing_date = row[:5]
             href, _link_text = _extract_ptr_link(ptr_html)
-            reports.append({
-                "first_name": first_name,
-                "last_name": last_name,
-                "politician": full_name,
-                "link": href,
-                "filing_date": filing_date,
-            })
+            reports.append(
+                {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "politician": full_name,
+                    "link": href,
+                    "filing_date": filing_date,
+                }
+            )
         return reports
 
     def fetch_trades_from_report(self, report: dict) -> list[Trade]:
@@ -207,19 +200,21 @@ class SenateClient:
         for row in parser.rows:
             if len(row) < 9:
                 continue
-            trades.append(Trade(
-                politician=politician,
-                transaction_date=row[1],
-                owner=row[2],
-                symbol=row[3],
-                asset_description=row[4],
-                asset_type=row[5],
-                trade_type=row[6],
-                amount=row[7],
-                comment=row[8] if len(row) > 8 else "",
-                filing_date=filing_date,
-                link=url,
-            ))
+            trades.append(
+                Trade(
+                    politician=politician,
+                    transaction_date=row[1],
+                    owner=row[2],
+                    symbol=row[3],
+                    asset_description=row[4],
+                    asset_type=row[5],
+                    trade_type=row[6],
+                    amount=row[7],
+                    comment=row[8] if len(row) > 8 else "",
+                    filing_date=filing_date,
+                    link=url,
+                )
+            )
         return trades
 
     def fetch_trades(self, limit: int = 10) -> list[Trade]:
@@ -233,8 +228,7 @@ class SenateClient:
         return all_trades
 
     def close(self) -> None:
-        if self._owned:
-            self._client.close()
+        self._client.close()
 
     def __enter__(self) -> SenateClient:
         return self
